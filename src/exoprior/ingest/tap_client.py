@@ -173,3 +173,60 @@ def fetch(
     meta_path.write_text(json.dumps(meta, indent=2))
 
     return df
+
+
+def _main() -> None:
+    import argparse
+    import sys
+
+    from exoprior.ingest.schema import SchemaError, validate
+
+    parser = argparse.ArgumentParser(
+        prog="python -m exoprior.ingest.tap_client",
+        description="Fetch the NASA TAP transiting-planet catalog and save it to data/raw/.",
+    )
+    parser.add_argument(
+        "--raw-dir",
+        default="data/raw",
+        help="Directory for raw Parquet and query metadata (default: data/raw)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download even if a cached file already exists",
+    )
+    args = parser.parse_args()
+
+    raw_dir = Path(args.raw_dir)
+
+    print(f"Fetching catalog from {TAP_ENDPOINT} …")
+    df = fetch(raw_dir, force=args.force)
+
+    print("Validating schema …")
+    try:
+        validate(df)
+    except SchemaError as exc:
+        print(f"\nSchema validation FAILED:\n{exc}", file=sys.stderr)
+        sys.exit(1)
+
+    parquet_path = raw_dir / "ps_transiting_default.parquet"
+    meta_path = raw_dir / "ps_transiting_default_query.json"
+
+    print(f"\nOutput files:")
+    print(f"  Parquet : {parquet_path.resolve()}")
+    print(f"  Metadata: {meta_path.resolve()}")
+
+    print(f"\nCatalog shape: {len(df)} rows × {len(df.columns)} columns")
+
+    null_pct = (df.isna().mean() * 100).sort_values(ascending=False)
+    any_missing = null_pct[null_pct > 0]
+    if any_missing.empty:
+        print("\nMissingness: none")
+    else:
+        print(f"\nMissingness (columns with >0% null, descending):")
+        for col, pct in any_missing.items():
+            print(f"  {col:<30} {pct:5.1f}%")
+
+
+if __name__ == "__main__":
+    _main()

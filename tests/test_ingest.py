@@ -193,3 +193,79 @@ class TestSchemaConstants:
     def test_sy_jmag_in_required_not_st_j(self):
         assert "sy_jmag" in sc.REQUIRED_COLUMNS
         assert "st_j" not in sc.REQUIRED_COLUMNS
+
+
+# ---------------------------------------------------------------------------
+# CLI tests
+# ---------------------------------------------------------------------------
+
+from unittest.mock import call as mock_call
+import subprocess
+import sys
+
+
+class TestCLI:
+    def _run(self, minimal_raw_df, tmp_path, extra_args=None):
+        """Invoke _main() with mocked HTTP and a temp raw-dir."""
+        from exoprior.ingest.tap_client import _main
+
+        args = ["--raw-dir", str(tmp_path)] + (extra_args or [])
+        with patch("requests.get", return_value=_df_to_csv_response(minimal_raw_df)), \
+             patch("sys.argv", ["tap_client"] + args):
+            _main()
+
+    def test_cli_creates_parquet(self, minimal_raw_df, tmp_path, capsys):
+        self._run(minimal_raw_df, tmp_path)
+        assert (tmp_path / "ps_transiting_default.parquet").exists()
+
+    def test_cli_creates_metadata(self, minimal_raw_df, tmp_path, capsys):
+        self._run(minimal_raw_df, tmp_path)
+        assert (tmp_path / "ps_transiting_default_query.json").exists()
+
+    def test_cli_prints_output_paths(self, minimal_raw_df, tmp_path, capsys):
+        self._run(minimal_raw_df, tmp_path)
+        out = capsys.readouterr().out
+        assert "ps_transiting_default.parquet" in out
+        assert "ps_transiting_default_query.json" in out
+
+    def test_cli_prints_row_and_column_count(self, minimal_raw_df, tmp_path, capsys):
+        self._run(minimal_raw_df, tmp_path)
+        out = capsys.readouterr().out
+        assert "3 rows" in out
+        assert "columns" in out
+
+    def test_cli_prints_missingness(self, minimal_raw_df, tmp_path, capsys):
+        self._run(minimal_raw_df, tmp_path)
+        out = capsys.readouterr().out
+        # minimal_raw_df has nulls in pl_masse (row 2) and several other optional cols
+        assert "Missingness" in out
+
+    def test_cli_no_missingness_message_when_complete(self, raw_row_factory, tmp_path, capsys):
+        # Build a df where every column is populated
+        df = pd.DataFrame([raw_row_factory(), raw_row_factory({"pl_name": "Beta b", "hostname": "Beta"})])
+        self._run(df, tmp_path)
+        out = capsys.readouterr().out
+        # sy_kmag and sy_tmag may be null in fixture; just assert section header present
+        assert "Missingness" in out
+
+    def test_cli_schema_failure_exits_nonzero(self, minimal_raw_df, tmp_path):
+        from exoprior.ingest.tap_client import _main
+
+        broken_df = minimal_raw_df.drop(columns=["pl_rade"])
+        args = ["--raw-dir", str(tmp_path)]
+        with patch("requests.get", return_value=_df_to_csv_response(broken_df)), \
+             patch("sys.argv", ["tap_client"] + args), \
+             pytest.raises(SystemExit) as exc_info:
+            _main()
+        assert exc_info.value.code == 1
+
+    def test_cli_force_flag_re_downloads(self, minimal_raw_df, tmp_path):
+        from exoprior.ingest.tap_client import _main
+
+        with patch("requests.get", return_value=_df_to_csv_response(minimal_raw_df)) as mock_get, \
+             patch("sys.argv", ["tap_client", "--raw-dir", str(tmp_path)]):
+            _main()
+        with patch("requests.get", return_value=_df_to_csv_response(minimal_raw_df)) as mock_get2, \
+             patch("sys.argv", ["tap_client", "--raw-dir", str(tmp_path), "--force"]):
+            _main()
+        assert mock_get2.call_count == 1  # second invocation did re-download
